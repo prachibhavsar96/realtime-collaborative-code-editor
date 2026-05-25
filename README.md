@@ -1,16 +1,16 @@
-# CollabCode
+# 🚀 CollabCode — Real-Time Collaborative Code Editor
 
-A real-time collaborative code editor with private rooms, multi-file workspaces, Monaco Editor, PostgreSQL persistence, Redis-backed Socket.IO scaling, JWT authentication, and code execution.
+A distributed real-time collaborative code editor inspired by VS Code and Replit, built with React, Node.js, Socket.IO, PostgreSQL, and Redis.
 
-CollabCode is built as a full-stack TypeScript monorepo with a React/Vite frontend and a Node.js/Express backend. It is designed for teams who need a lightweight Replit/VS Code-style web workspace where collaborators can edit, see presence, manage files, and run code together.
+CollabCode enables multiple users to collaborate on shared workspaces with real-time synchronization, Operational Transformation (OT), cursor presence, persistent workspaces, secure invite-based rooms, and collaborative project editing.
+
+---
 
 ## Screenshots
 
-> Add screenshots after deployment or local capture.
-
 | Login | Workspace | Invite Room |
 | --- | --- | --- |
-| `docs/screenshots/login.png` | `docs/screenshots/workspace.png` | `docs/screenshots/invite.png` |
+|<img width="1915" height="1015" alt="image" src="https://github.com/user-attachments/assets/2bf6e3e6-ecb6-4977-a24f-ed2956f1c8f0" />| <img width="1918" height="1018" alt="image" src="https://github.com/user-attachments/assets/ddf29170-b6a3-40c2-bac4-ce8054059bc6" />| <img width="941" height="647" alt="Screenshot 2026-05-25 161316" src="https://github.com/user-attachments/assets/c5019d34-05e2-421c-bf53-0bfaf1d068e3" />|
 
 ## Features
 
@@ -357,6 +357,8 @@ File extensions determine the language used for syntax highlighting and executio
 - Comments and annotations
 - End-to-end tests
 
-## License
+## Author
 
-Add your preferred license here.
+Prachi Bhavsar
+
+MS Information Technology @ Arizona State University
