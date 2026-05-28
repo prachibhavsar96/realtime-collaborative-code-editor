@@ -20,6 +20,7 @@ const isProduction = NODE_ENV === "production";
 const JUDGE0_API_URL = (process.env.JUDGE0_API_URL || "https://ce.judge0.com").replace(/\/$/, "");
 const DATABASE_URL = process.env.DATABASE_URL?.trim();
 const REDIS_URL = process.env.REDIS_URL?.trim();
+const ENABLE_REDIS = process.env.ENABLE_REDIS === "true";
 const JWT_SECRET = process.env.JWT_SECRET?.trim() || "change_me_in_dev";
 const FRONTEND_URL = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
 const allowedOrigins = (process.env.CORS_ORIGINS || [
@@ -463,12 +464,20 @@ app.use(
 );
 app.use(express.json());
 
+const getRedisHealthStatus = () => {
+  if (!ENABLE_REDIS) {
+    return "disabled";
+  }
+
+  return redisPubClient && redisSubClient ? "connected" : "unavailable";
+};
+
 app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
     environment: NODE_ENV,
     postgres: persistenceAvailable ? "connected" : "unavailable",
-    redis: redisPubClient && redisSubClient ? "connected" : "unavailable",
+    redis: getRedisHealthStatus(),
     uptime: process.uptime()
   });
 });
@@ -1362,6 +1371,11 @@ const scheduleDatabaseReconnect = () => {
 };
 
 const initializeRedisAdapter = async () => {
+  if (!ENABLE_REDIS) {
+    logRedis("Redis disabled - running Socket.IO in single-instance mode");
+    return;
+  }
+
   logRedis(`REDIS_URL found: ${REDIS_URL ? "yes" : "no"}`);
 
   if (!REDIS_URL) {
