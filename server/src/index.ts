@@ -490,7 +490,7 @@ const validateAuthPayload = ({ username, password }: AuthPayload) => {
 
 const signAuthToken = (user: AuthUser) =>
   jwt.sign({ userId: user.id, username: user.username } satisfies JwtPayload, JWT_SECRET, {
-    expiresIn: "7d"
+    expiresIn: "1h"
   });
 
 const verifyAuthToken = (token?: string): AuthUser | null => {

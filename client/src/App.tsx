@@ -185,6 +185,9 @@ type AuthResponse = {
 const backendUrl = (import.meta.env.VITE_BACKEND_URL || "http://localhost:4000").replace(/\/$/, "");
 const websocketUrl = (import.meta.env.VITE_WEBSOCKET_URL || backendUrl).replace(/\/$/, "");
 const authTokenStorageKey = "collabcode_auth_token";
+const inactivityWarningMs = 25 * 60 * 1000;
+const inactivityTimeoutMs = 30 * 60 * 1000;
+const inactivityEvents = ["mousemove", "keydown", "click", "scroll", "touchstart"] as const;
 const maxRecentRooms = 10;
 const ignoredUploadFolders = new Set(["node_modules", ".git", "dist", "build"]);
 const maxUploadFileBytes = 1024 * 1024;
@@ -399,6 +402,76 @@ const formatRecentOpenedTime = (value: string) => {
   });
 };
 
+const getJwtExpirationMs = (token: string) => {
+  try {
+    const [, payload] = token.split(".");
+    if (!payload) {
+      return null;
+    }
+
+    const base64Payload = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const normalizedPayload = base64Payload.padEnd(base64Payload.length + ((4 - (base64Payload.length % 4)) % 4), "=");
+    const parsedPayload = JSON.parse(window.atob(normalizedPayload)) as { exp?: number };
+    return typeof parsedPayload.exp === "number" ? parsedPayload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+};
+
+const useInactivityLogout = (
+  enabled: boolean,
+  onWarning: () => void,
+  onTimeout: () => void,
+  onActivity: () => void
+) => {
+  const warningTimerRef = useRef<number | null>(null);
+  const logoutTimerRef = useRef<number | null>(null);
+  const onWarningRef = useRef(onWarning);
+  const onTimeoutRef = useRef(onTimeout);
+  const onActivityRef = useRef(onActivity);
+
+  useEffect(() => {
+    onWarningRef.current = onWarning;
+    onTimeoutRef.current = onTimeout;
+    onActivityRef.current = onActivity;
+  }, [onWarning, onTimeout, onActivity]);
+
+  useEffect(() => {
+    const clearTimers = () => {
+      if (warningTimerRef.current) {
+        window.clearTimeout(warningTimerRef.current);
+      }
+      if (logoutTimerRef.current) {
+        window.clearTimeout(logoutTimerRef.current);
+      }
+    };
+
+    if (!enabled) {
+      clearTimers();
+      return;
+    }
+
+    const resetTimers = () => {
+      clearTimers();
+      onActivityRef.current();
+      warningTimerRef.current = window.setTimeout(() => {
+        onWarningRef.current();
+      }, inactivityWarningMs);
+      logoutTimerRef.current = window.setTimeout(() => {
+        onTimeoutRef.current();
+      }, inactivityTimeoutMs);
+    };
+
+    inactivityEvents.forEach((eventName) => window.addEventListener(eventName, resetTimers, { passive: true }));
+    resetTimers();
+
+    return () => {
+      clearTimers();
+      inactivityEvents.forEach((eventName) => window.removeEventListener(eventName, resetTimers));
+    };
+  }, [enabled]);
+};
+
 function App() {
   const [username, setUsername] = useState("");
   const [authUsername, setAuthUsername] = useState("");
@@ -407,6 +480,7 @@ function App() {
   const [authToken, setAuthToken] = useState(() => window.localStorage.getItem(authTokenStorageKey) || "");
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [authError, setAuthError] = useState("");
+  const [inactivityWarning, setInactivityWarning] = useState("");
   const [isAuthSubmitting, setIsAuthSubmitting] = useState(false);
   const [roomId, setRoomId] = useState("");
   const [displayRoomName, setDisplayRoomName] = useState("");
@@ -500,13 +574,33 @@ function App() {
     Authorization: `Bearer ${authToken}`
   });
 
+  const logout = (reason = "") => {
+    window.localStorage.removeItem(authTokenStorageKey);
+    resetRoomSession();
+    setAuthToken("");
+    setCurrentUser(null);
+    setUsername("");
+    setRecentRooms([]);
+    setAuthPassword("");
+    setAuthError(reason);
+    setInactivityWarning("");
+  };
+
+  const authFetch = async (input: RequestInfo | URL, init: RequestInit = {}, reason = "Your session expired. Please log in again.") => {
+    const response = await fetch(input, init);
+    if (response.status === 401) {
+      logout(reason);
+    }
+    return response;
+  };
+
   const loadRecentRooms = async (token = authToken) => {
     if (!token) {
       setRecentRooms([]);
       return;
     }
 
-    const response = await fetch(`${backendUrl}/rooms/recent`, {
+    const response = await authFetch(`${backendUrl}/rooms/recent`, {
       headers: {
         Authorization: `Bearer ${token}`
       }
@@ -544,6 +638,8 @@ function App() {
       setAuthToken(result.token);
       setCurrentUser(result.user);
       setUsername(result.user.username);
+      setAuthError("");
+      setInactivityWarning("");
       setAuthPassword("");
       await loadRecentRooms(result.token);
     } catch (error) {
@@ -586,25 +682,33 @@ function App() {
     socketIdRef.current = "";
   };
 
-  const logout = () => {
-    window.localStorage.removeItem(authTokenStorageKey);
-    resetRoomSession();
-    setAuthToken("");
-    setCurrentUser(null);
-    setUsername("");
-    setRecentRooms([]);
-    setAuthPassword("");
-    setAuthError("");
-  };
+  useInactivityLogout(
+    Boolean(authToken && currentUser),
+    () => setInactivityWarning("You will be logged out soon due to inactivity."),
+    () => logout("You were logged out due to inactivity."),
+    () => setInactivityWarning("")
+  );
 
   useEffect(() => {
     if (!authToken) {
       return;
     }
 
+    const expiresAt = getJwtExpirationMs(authToken);
+    if (expiresAt && expiresAt <= Date.now()) {
+      logout("Your session expired. Please log in again.");
+      return;
+    }
+
+    const expirationTimer = expiresAt
+      ? window.setTimeout(() => {
+          logout("Your session expired. Please log in again.");
+        }, Math.max(0, expiresAt - Date.now()))
+      : null;
+
     const loadUser = async () => {
       try {
-        const response = await fetch(`${backendUrl}/me`, {
+        const response = await authFetch(`${backendUrl}/me`, {
           headers: {
             Authorization: `Bearer ${authToken}`
           }
@@ -617,11 +721,17 @@ function App() {
         setUsername(result.user.username);
         await loadRecentRooms(authToken);
       } catch {
-        logout();
+        logout("Your session expired. Please log in again.");
       }
     };
 
     void loadUser();
+
+    return () => {
+      if (expirationTimer) {
+        window.clearTimeout(expirationTimer);
+      }
+    };
   }, [authToken]);
 
   useEffect(() => {
@@ -824,7 +934,11 @@ function App() {
       setSocketId("");
     });
 
-    socket.on("connect_error", () => {
+    socket.on("connect_error", (error) => {
+      if (error.message === "Authentication required.") {
+        logout("Your session expired. Please log in again.");
+        return;
+      }
       setConnectionStatus("Connection error");
     });
 
@@ -1026,7 +1140,7 @@ function App() {
     setRoomAccessError("");
 
     try {
-      const response = await fetch(`${backendUrl}/rooms/join`, {
+      const response = await authFetch(`${backendUrl}/rooms/join`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ accessCode })
@@ -1062,7 +1176,7 @@ function App() {
   };
 
   const removeRecentRoom = async (roomIdToRemove: string) => {
-    await fetch(`${backendUrl}/rooms/recent/${encodeURIComponent(roomIdToRemove)}`, {
+    await authFetch(`${backendUrl}/rooms/recent/${encodeURIComponent(roomIdToRemove)}`, {
       method: "DELETE",
       headers: {
         Authorization: `Bearer ${authToken}`
@@ -1072,7 +1186,7 @@ function App() {
   };
 
   const clearRecentRooms = async () => {
-    await fetch(`${backendUrl}/rooms/recent`, {
+    await authFetch(`${backendUrl}/rooms/recent`, {
       method: "DELETE",
       headers: {
         Authorization: `Bearer ${authToken}`
@@ -1086,7 +1200,7 @@ function App() {
     setRoomAccessError("");
 
     try {
-      const response = await fetch(`${backendUrl}/rooms/create`, {
+      const response = await authFetch(`${backendUrl}/rooms/create`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ displayName: displayRoomName })
@@ -1381,7 +1495,7 @@ function App() {
     });
 
     try {
-      const response = await fetch(`${backendUrl}/execute`, {
+      const response = await authFetch(`${backendUrl}/execute`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({
@@ -1583,10 +1697,12 @@ function App() {
 
             <div className="dashboard-user-row">
               <span>Logged in as <strong>{currentUser.username}</strong></span>
-              <button type="button" className="ghost-button" onClick={logout}>
+              <button type="button" className="ghost-button" onClick={() => logout()}>
                 Logout
               </button>
             </div>
+
+            {inactivityWarning ? <div className="session-warning">{inactivityWarning}</div> : null}
 
             <label>
               Join with invite code
@@ -1746,13 +1862,14 @@ function App() {
           <span className={`meta-badge save-status ${saveStatus === "Save failed" ? "failed" : ""}`}>
             {saveStatus}
           </span>
+          {inactivityWarning ? <span className="meta-badge session-warning-badge">{inactivityWarning}</span> : null}
           <button className="ghost-button" type="button" onClick={saveWorkspace} disabled={!hasSyncedWorkspace || saveStatus === "Saving..."}>
             Save
           </button>
           <button className="leave-button" type="button" onClick={leaveRoom}>
             Leave room
           </button>
-          <button className="ghost-button" type="button" onClick={logout}>
+          <button className="ghost-button" type="button" onClick={() => logout()}>
             Logout
           </button>
         </div>
