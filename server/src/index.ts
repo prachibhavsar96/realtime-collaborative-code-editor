@@ -19,7 +19,7 @@ const NODE_ENV = process.env.NODE_ENV?.trim() || "development";
 const isProduction = NODE_ENV === "production";
 const JUDGE0_API_URL = (process.env.JUDGE0_API_URL || "https://ce.judge0.com").replace(/\/$/, "");
 const DATABASE_URL = process.env.DATABASE_URL?.trim();
-const REDIS_URL = process.env.REDIS_URL?.trim() || "redis://localhost:6379";
+const REDIS_URL = process.env.REDIS_URL?.trim();
 const JWT_SECRET = process.env.JWT_SECRET?.trim() || "change_me_in_dev";
 const FRONTEND_URL = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
 const allowedOrigins = (process.env.CORS_ORIGINS || [
@@ -1176,10 +1176,72 @@ const getSafeDatabaseUrl = () => {
 
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) {
-    return error.message;
+    return error.message || error.name;
   }
 
-  return String(error);
+  if (typeof error === "string") {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+};
+
+const getErrorDetails = (error: unknown) => {
+  if (error instanceof Error) {
+    return error.stack || `${error.name}: ${error.message}`;
+  }
+
+  return getErrorMessage(error);
+};
+
+const logRedis = (message: string) => {
+  console.info(message);
+};
+
+const createRedisErrorLogger = (clientName: "pub" | "sub") => {
+  let errorCount = 0;
+
+  return (error: unknown) => {
+    errorCount += 1;
+
+    if (errorCount <= 3) {
+      console.error(`Redis ${clientName} client error: ${getErrorDetails(error)}`);
+      return;
+    }
+
+    if (errorCount === 4) {
+      console.error(`Redis ${clientName} client error logging suppressed after 3 errors`);
+    }
+  };
+};
+
+const getRedisClientUrl = (redisUrl: string) => {
+  try {
+    const parsedUrl = new URL(redisUrl);
+    const isUpstashHost = parsedUrl.hostname.endsWith(".upstash.io");
+
+    if (parsedUrl.protocol === "redis:" && isUpstashHost) {
+      parsedUrl.protocol = "rediss:";
+      return parsedUrl.toString();
+    }
+  } catch {
+    return redisUrl;
+  }
+
+  return redisUrl;
+};
+
+const shouldUseRedisTls = (redisUrl: string) => {
+  try {
+    const parsedUrl = new URL(redisUrl);
+    return parsedUrl.protocol === "rediss:";
+  } catch {
+    return false;
+  }
 };
 
 const emitAutosaveStatus = (roomId: string, status: AutosaveState, error?: unknown, savedAt?: Date) => {
@@ -1300,39 +1362,58 @@ const scheduleDatabaseReconnect = () => {
 };
 
 const initializeRedisAdapter = async () => {
-  logInfo(`Redis connecting: url=${REDIS_URL}`);
+  logRedis(`REDIS_URL found: ${REDIS_URL ? "yes" : "no"}`);
 
-  const pubClient = createClient({
-    url: REDIS_URL,
-    socket: {
-      reconnectStrategy: (retries) => Math.min(retries * 100, 5000)
-    }
-  });
-  const subClient = pubClient.duplicate();
+  if (!REDIS_URL) {
+    console.error("Redis unavailable: REDIS_URL missing");
+    return;
+  }
 
-  pubClient.on("error", (error) => {
-    console.error(`Redis pub client error: ${getErrorMessage(error)}`);
-  });
+  logRedis("Redis connecting...");
 
-  subClient.on("error", (error) => {
-    console.error(`Redis sub client error: ${getErrorMessage(error)}`);
-  });
-
-  pubClient.on("reconnecting", () => logInfo("Redis pub client reconnecting"));
-  subClient.on("reconnecting", () => logInfo("Redis sub client reconnecting"));
+  let pubClient: ReturnType<typeof createClient> | null = null;
+  let subClient: ReturnType<typeof createClient> | null = null;
 
   try {
-    await Promise.all([pubClient.connect(), subClient.connect()]);
-    logInfo("Redis connected");
+    const redisClientUrl = getRedisClientUrl(REDIS_URL);
+    const useTls = shouldUseRedisTls(redisClientUrl);
+    const maxReconnectRetries = Number(process.env.REDIS_MAX_RECONNECT_RETRIES) || 8;
+    const socketOptions = {
+      ...(useTls ? { tls: true as const } : {}),
+      reconnectStrategy: (retries: number) => {
+        if (retries > maxReconnectRetries) {
+          return false;
+        }
+
+        return Math.min(retries * 100, 3000);
+      }
+    };
+
+    pubClient = createClient({
+      url: redisClientUrl,
+      socket: socketOptions
+    });
+    subClient = pubClient.duplicate();
+
+    pubClient.on("error", createRedisErrorLogger("pub"));
+    subClient.on("error", createRedisErrorLogger("sub"));
+
+    pubClient.on("reconnecting", () => logRedis("Redis pub client reconnecting"));
+    subClient.on("reconnecting", () => logRedis("Redis sub client reconnecting"));
+
+    await pubClient.connect();
+    logRedis("Redis pub connected");
+    await subClient.connect();
+    logRedis("Redis sub connected");
     io.adapter(createAdapter(pubClient, subClient));
     redisPubClient = pubClient as RedisClientType;
     redisSubClient = subClient as RedisClientType;
-    logInfo("Redis adapter initialized");
+    logRedis("Redis adapter initialized");
   } catch (error) {
-    await Promise.allSettled([pubClient.quit(), subClient.quit()]);
+    await Promise.allSettled([pubClient?.quit(), subClient?.quit()]);
     redisPubClient = null;
     redisSubClient = null;
-    console.error(`Redis unavailable, Socket.IO scaling disabled: ${getErrorMessage(error)}`);
+    console.error(`Redis unavailable: ${getErrorDetails(error)}`);
   }
 };
 
